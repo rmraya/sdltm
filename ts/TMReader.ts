@@ -33,22 +33,23 @@ export class TMReader {
         this.db = new sqlite3.Database(sdltm, sqlite3.OPEN_READONLY, function callback(error: Error) {
             if (error) {
                 console.error('Error opening database:', error.message);
-                return;
+                throw error;
             }
         });
     }
+
     getSourceLanguage(tmx: string): string {
         let srcLang: string = '';
-        this.db.each(`SELECT source_language srcLang FROM translation_memories`, [], (err: Error, row: any) => {
-            if (err) {
-                throw err;
-            }
-            srcLang = row.srcLang;
-        },
+        this.db.each(`SELECT source_language srcLang FROM translation_memories`, [],
+            (err: Error, row: any) => {
+                if (err) {
+                    throw err;
+                }
+                srcLang = row.srcLang;
+            },
             (error: Error) => {
                 if (error) {
                     console.error('Error parsing database:', error.message);
-                    return;
                 }
                 let headerString: string = new XMLDeclaration('1.0', 'UTF-8').toString();
                 headerString += '\n<tmx version="1.4">\n  '
@@ -72,60 +73,58 @@ export class TMReader {
         this.db.close(function callback(error: Error) {
             if (error) {
                 console.error('Error closing database:', error.message);
-                return;
             }
         });
     }
 
     parseDatabase(tmx: string): void {
-
         let indenter: Indenter = new Indenter(2, 2);
-
         let sql: string = `SELECT id, source_segment source,  target_segment target, creation_date creation, creation_user creator, 
             change_date change FROM translation_units`;
+        this.db.each(sql, [],
+            (err: Error, row: any) => {
+                if (err) {
+                    throw err;
+                }
+                let source: XMLElement = this.toElement(row.source);
+                let target: XMLElement = this.toElement(row.target);
 
-        this.db.each(sql, [], (err: Error, row: any) => {
-            if (err) {
-                throw err;
-            }
-            let source: XMLElement = this.toElement(row.source);
-            let target: XMLElement = this.toElement(row.target);
+                let tu: XMLElement = new XMLElement('tu');
+                tu.setAttribute(new XMLAttribute('creationid', row.creator));
+                tu.setAttribute(new XMLAttribute('creationdate', this.tmxDateString(row.creation)));
+                let changeDate: string = this.tmxDateString(row.creation);
+                if (changeDate !== '') {
+                    tu.setAttribute(new XMLAttribute('changedate', changeDate));
+                }
 
-            let tu: XMLElement = new XMLElement('tu');
-            tu.setAttribute(new XMLAttribute('creationid', row.creator));
-            tu.setAttribute(new XMLAttribute('creationdate', this.tmxDateString(row.creation)));
-            let changeDate: string = this.tmxDateString(row.creation);
-            if (changeDate !== '') {
-                tu.setAttribute(new XMLAttribute('changedate', changeDate));
-            }
+                let srcLang: string = source.getChild('CultureName').getText();
+                let srcTuv: XMLElement = new XMLElement('tuv');
+                srcTuv.setAttribute(new XMLAttribute('xml:lang', srcLang));
+                tu.addElement(srcTuv);
+                let srcSeg: XMLElement = new XMLElement('seg');
+                srcSeg.setContent(this.parseContent(source.getChild('Elements')));
+                srcTuv.addElement(srcSeg);
 
-            let srcLang: string = source.getChild('CultureName').getText();
-            let srcTuv: XMLElement = new XMLElement('tuv');
-            srcTuv.setAttribute(new XMLAttribute('xml:lang', srcLang));
-            tu.addElement(srcTuv);
-            let srcSeg: XMLElement = new XMLElement('seg');
-            srcSeg.setContent(this.parseContent(source.getChild('Elements')));
-            srcTuv.addElement(srcSeg);
+                let tgtLang: string = target.getChild('CultureName').getText();
+                let tgtTuv: XMLElement = new XMLElement('tuv');
+                tgtTuv.setAttribute(new XMLAttribute('xml:lang', tgtLang));
+                tu.addElement(tgtTuv);
+                let tgtSeg: XMLElement = new XMLElement('seg');
+                tgtSeg.setContent(this.parseContent(target.getChild('Elements')));
+                tgtTuv.addElement(tgtSeg);
 
-            let tgtLang: string = target.getChild('CultureName').getText();
-            let tgtTuv: XMLElement = new XMLElement('tuv');
-            tgtTuv.setAttribute(new XMLAttribute('xml:lang', tgtLang));
-            tu.addElement(tgtTuv);
-            let tgtSeg: XMLElement = new XMLElement('seg');
-            tgtSeg.setContent(this.parseContent(target.getChild('Elements')));
-            tgtTuv.addElement(tgtSeg);
-
-            indenter.indent(tu);
-            appendFileSync(tmx, Buffer.from('  ' + tu.toString() + '\n'), 'utf8');
-        }, (error: Error, count: number) => {
-            if (error) {
-                console.error('Error parsing database:', error.message);
-                return;
-            }
-            appendFileSync(tmx, '  </body>\n</tmx>', 'utf8');
-            console.log('Processed ', count, 'translation units');
-            this.closeDb();
-        });
+                indenter.indent(tu);
+                appendFileSync(tmx, Buffer.from('  ' + tu.toString() + '\n'), 'utf8');
+            },
+            (error: Error, count: number) => {
+                if (error) {
+                    console.error('Error parsing database:', error.message);
+                    return;
+                }
+                appendFileSync(tmx, '  </body>\n</tmx>', 'utf8');
+                console.log('Processed ', count, 'translation units');
+                this.closeDb();
+            });
     }
 
     toElement(text: string): XMLElement {
@@ -168,14 +167,11 @@ export class TMReader {
 
     tmxDateString(date: string): string {
         while (date.indexOf('-') != -1) {
-            date = date.replace('-','');
+            date = date.replace('-', '');
         }
         while (date.indexOf(':') != -1) {
-            date = date.replace(':','');
+            date = date.replace(':', '');
         }
         return date.replace(' ', 'T') + 'Z';
     }
-
 }
-
-new TMReader('/Users/rmraya/Desktop/Trados 17/Astria spoiler instruction.html_Tag handling.sdltm', '/Users/rmraya/Desktop/Trados 17/Astria spoiler instruction.html_Tag handling.tmx',)
