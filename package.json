@@ -1,6 +1,6 @@
 {
   "name": "sdltm",
-  "version": "1.0.0",  
+  "version": "1.0.1",  
   "description": "TypeScript library for converting SDLTM files to TMX 1.4",
   "author": {
     "name": "Rodolfo M. Raya",
