@@ -9,18 +9,24 @@ TypeScript library for converting SDLTM files (Translation Memory databases from
 ## Example
 
 ```TypeScript
-import { TMReader } from 'sdltm';
+import { TMReader } from "./TMReader";
+
+const SUCCESS: string = 'Success';
+const ERROR: string = 'Error';
 
 class Test {
 
-    constructor() {
-        try {
-            new TMReader('Sample.sdltm', 'Output.tmx');            
-        } catch (e) {
-            console.log(e.message)
-        }
+    constructor(sdltmFile: string, tmxFile: string) {
+        new TMReader(sdltmFile, tmxFile, { 'productName': "My Tool", 'version': '1.0' }, (data: any) => {
+            if (data.status === SUCCESS) {
+                console.log(JSON.stringify(data));
+            }
+            if (data.status === ERROR) {
+                console.error(data.reason);
+            }
+        });
     }
 }
 
-new Test();
+new Test('Japanese.sdltm', 'Japanese.tmx');
 ```

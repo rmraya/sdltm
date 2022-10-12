@@ -9,53 +9,75 @@
  * Contributors:
  *     Maxprograms - initial API and implementation
  *******************************************************************************/
-import { Database } from "sqlite3";
-import sqlite3 = require('sqlite3');
-import { unlinkSync, existsSync, appendFileSync } from 'fs';
-import { XMLElement, XMLParser, XMLDocument, Indenter, XMLAttribute, XMLDeclaration, XMLNode, Constants } from 'typesxml';
 import { Buffer } from 'buffer';
+import { appendFileSync, existsSync, unlinkSync } from 'fs';
+import { Database } from "sqlite3";
+import { Constants, Indenter, XMLAttribute, XMLDeclaration, XMLDocument, XMLElement, XMLNode, XMLParser } from 'typesxml';
+import sqlite3 = require('sqlite3');
+
+const SUCCESS: string = 'Success';
+const ERROR: string = 'Error';
 
 export class TMReader {
 
     db: Database;
     parser: XMLParser;
+    productName: string = 'sdltm';
+    version: string = '1.0.2';
 
-    constructor(sdltm: string, tmx: string) {
+    constructor(sdltm: string, tmx: string, options: any, callback: Function) {
         if (existsSync(tmx)) {
             unlinkSync(tmx);
         }
+        if (options.productName) {
+            this.productName = options.productName;
+        }
+        if (options.version) {
+            this.version = options.version;
+        }
         this.parser = new XMLParser();
-        this.openDatabase(sdltm);
-        this.getSourceLanguage(tmx);
+        this.openDatabase(sdltm, tmx, callback);
     }
 
-    openDatabase(sdltm: string): void {
-        this.db = new sqlite3.Database(sdltm, sqlite3.OPEN_READONLY, function callback(error: Error) {
+    openDatabase(sdltm: string, tmx: string, callback: Function): void {
+        this.db = new sqlite3.Database(sdltm, sqlite3.OPEN_READONLY, (error: Error) => {
             if (error) {
-                console.error('Error opening database:', error.message);
-                throw error;
+                callback({
+                    'status': ERROR,
+                    'reason': error.message
+                })
+                return;
             }
+            this.getSourceLanguage(tmx, callback);
         });
     }
 
-    getSourceLanguage(tmx: string): string {
+    getSourceLanguage(tmx: string, callback: Function): void {
         let srcLang: string = '';
         this.db.each(`SELECT source_language srcLang FROM translation_memories`, [],
-            (err: Error, row: any) => {
-                if (err) {
-                    throw err;
+            (error: Error, row: any) => {
+                if (error) {
+                    callback({
+                        'status': ERROR,
+                        'reason': error.message
+                    })
+                    return;
                 }
                 srcLang = row.srcLang;
             },
             (error: Error) => {
                 if (error) {
-                    console.error('Error parsing database:', error.message);
+                    callback({
+                        'status': ERROR,
+                        'reason': error.message
+                    })
+                    return;
                 }
                 let headerString: string = new XMLDeclaration('1.0', 'UTF-8').toString();
                 headerString += '\n<tmx version="1.4">\n  '
                 let header: XMLElement = new XMLElement('header');
-                header.setAttribute(new XMLAttribute('creationtool', 'sdltm'));
-                header.setAttribute(new XMLAttribute('creationtoolversion', '1.0.0'));
+                header.setAttribute(new XMLAttribute('creationtool', this.productName));
+                header.setAttribute(new XMLAttribute('creationtoolversion', this.version));
                 header.setAttribute(new XMLAttribute('o-tmf', 'SDLTM'));
                 header.setAttribute(new XMLAttribute('adminlang', 'en-US'));
                 header.setAttribute(new XMLAttribute('segtype', 'sentence'));
@@ -64,23 +86,30 @@ export class TMReader {
                 headerString += header.toString();
                 headerString += '\n  <body>\n';
                 appendFileSync(tmx, headerString, 'utf8');
-                this.parseDatabase(tmx);
+                this.parseDatabase(tmx, callback);
             });
-        return srcLang;
     }
 
-    closeDb(): void {
-        this.db.close(function callback(error: Error) {
+    closeDb(count: number, callback: Function): void {
+        this.db.close((error: Error) => {
             if (error) {
-                console.error('Error closing database:', error.message);
+                callback({
+                    'status': ERROR,
+                    'reason': error.message
+                })
+                return;
             }
+            callback({
+                'status': SUCCESS,
+                'count': count
+            });
         });
     }
 
-    parseDatabase(tmx: string): void {
+    parseDatabase(tmx: string, callback: Function): void {
         let indenter: Indenter = new Indenter(2, 2);
         let sql: string = `SELECT id, source_segment source,  target_segment target, creation_date creation, creation_user creator, 
-            change_date change FROM translation_units`;
+             change_date change FROM translation_units`;
         this.db.each(sql, [],
             (err: Error, row: any) => {
                 if (err) {
@@ -118,12 +147,10 @@ export class TMReader {
             },
             (error: Error, count: number) => {
                 if (error) {
-                    console.error('Error parsing database:', error.message);
                     return;
                 }
                 appendFileSync(tmx, '  </body>\n</tmx>', 'utf8');
-                console.log('Processed ', count, 'translation units');
-                this.closeDb();
+                this.closeDb(count, callback);
             });
     }
 
