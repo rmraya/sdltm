@@ -12,7 +12,7 @@
 import { Buffer } from 'buffer';
 import { appendFileSync, existsSync, unlinkSync } from 'fs';
 import { Database } from "sqlite3";
-import { Constants, Indenter, XMLAttribute, XMLDeclaration, XMLDocument, XMLElement, XMLNode, XMLParser } from 'typesxml';
+import { Constants, DOMBuilder, Indenter, SAXParser, XMLAttribute, XMLDeclaration, XMLDocument, XMLElement, XMLNode } from 'typesxml';
 import sqlite3 = require('sqlite3');
 
 const SUCCESS: string = 'Success';
@@ -21,7 +21,8 @@ const ERROR: string = 'Error';
 export class TMReader {
 
     db: Database;
-    parser: XMLParser;
+    parser: SAXParser;
+    contentHandler: DOMBuilder;
     productName: string = 'sdltm';
     version: string = '1.0.2';
 
@@ -35,7 +36,9 @@ export class TMReader {
         if (options.version) {
             this.version = options.version;
         }
-        this.parser = new XMLParser();
+        this.parser = new SAXParser();
+        this.contentHandler = new DOMBuilder();
+        this.parser.setContentHandler(this.contentHandler);
         this.openDatabase(sdltm, tmx, callback);
     }
 
@@ -155,7 +158,8 @@ export class TMReader {
     }
 
     toElement(text: string): XMLElement {
-        let doc: XMLDocument = this.parser.parse(text);
+        this.parser.parseString(text);
+        let doc: XMLDocument = this.contentHandler.getDocument();
         return doc.getRoot();
     }
 
