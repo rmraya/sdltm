@@ -26,6 +26,6 @@
   "dependencies": {
     "@types/sqlite3": "^3.1.11",
     "sqlite3": "^5.1.7",
-    "typesxml": "^1.4.0"
+    "typesxml": "^1.4.1"
   }
 }
