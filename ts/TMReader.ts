@@ -9,14 +9,15 @@
  * Contributors:
  *     Maxprograms - initial API and implementation
  *******************************************************************************/
-import { Buffer } from 'buffer';
+
 import { appendFileSync, existsSync, unlinkSync } from 'fs';
-import { Database } from "sqlite3";
+import sqlite3, { Database } from 'sqlite3';
 import { Constants, DOMBuilder, Indenter, SAXParser, XMLAttribute, XMLDeclaration, XMLDocument, XMLElement, XMLNode, XMLUtils } from 'typesxml';
-import sqlite3 = require('sqlite3');
 
 const SUCCESS: string = 'Success';
 const ERROR: string = 'Error';
+
+export type TMReaderCallback = (result: { status: typeof SUCCESS; count: number } | { status: typeof ERROR; reason: string }) => void;
 
 export class TMReader {
 
@@ -24,12 +25,12 @@ export class TMReader {
     parser: SAXParser;
     contentHandler: DOMBuilder;
     productName: string = 'sdltm';
-    version: string = '1.4.0';
+    version: string = '1.7.0';
 
     tmx: string;
     header: XMLElement;
 
-    constructor(sdltm: string, tmx: string, options: any, callback: Function) {
+    constructor(sdltm: string, tmx: string, options: { productName?: string; version?: string }, callback: TMReaderCallback) {
         if (existsSync(tmx)) {
             unlinkSync(tmx);
         }
@@ -50,11 +51,7 @@ export class TMReader {
         this.parser = new SAXParser();
         this.contentHandler = new DOMBuilder();
         this.parser.setContentHandler(this.contentHandler);
-        this.openDatabase(sdltm, callback);
-    }
-
-    openDatabase(sdltm: string, callback: Function): void {
-        this.db = new sqlite3.Database(sdltm, sqlite3.OPEN_READONLY, (error: Error) => {
+        this.db = new sqlite3.Database(sdltm, sqlite3.OPEN_READONLY, (error: Error | null) => {
             if (error) {
                 callback({
                     'status': ERROR,
@@ -66,10 +63,10 @@ export class TMReader {
         });
     }
 
-    getHeaderAttributes(callback: Function): void {
+    getHeaderAttributes(callback: TMReaderCallback): void {
         this.db.each(`SELECT source_language, creation_user, creation_date FROM translation_memories`, [],
             // callback
-            (error: Error, row: any) => {
+            (error: Error | null, row: any) => {
                 if (error) {
                     callback({
                         'status': ERROR,
@@ -82,7 +79,7 @@ export class TMReader {
                 this.header.setAttribute(new XMLAttribute('creationid', row.creation_user));
             },
             // complete
-            (error: Error) => {
+            (error: Error | null) => {
                 if (error) {
                     callback({
                         'status': ERROR,
@@ -95,12 +92,12 @@ export class TMReader {
         );
     }
 
-    getHeaderProperties(callback: Function) {
+    getHeaderProperties(callback: TMReaderCallback): void {
         let propertiesMap: Map<string, XMLElement> = new Map<string, XMLElement>();
         this.db.each('SELECT attributes.name, attributes.type, picklist_values.value FROM attributes  ' +
             'INNER JOIN  picklist_values  ON  picklist_values.attribute_id = attributes.id  ORDER BY  name;', [],
             // callback
-            (error: Error, row: any) => {
+            (error: Error | null, row: any) => {
                 if (error) {
                     callback({
                         'status': ERROR,
@@ -116,15 +113,17 @@ export class TMReader {
                         this.header.addElement(prop);
                         propertiesMap.set(row.name, prop);
                     }
-                    let prop: XMLElement = propertiesMap.get(row.name);
-                    if (prop.getText() !== '') {
-                        prop.addString(',');
+                    let prop: XMLElement | undefined = propertiesMap.get(row.name);
+                    if (prop) {
+                        if (prop.getText() !== '') {
+                            prop.addString(',');
+                        }
+                        prop.addString(row.value);
                     }
-                    prop.addString(row.value);
                 }
             },
             // complete all properties
-            (error: Error) => {
+            (error: Error | null) => {
                 if (error) {
                     callback({
                         'status': ERROR,
@@ -137,7 +136,7 @@ export class TMReader {
         );
     }
 
-    writeHeader(callback: Function): void {
+    writeHeader(callback: TMReaderCallback): void {
         let indenter: Indenter = new Indenter(2, 2);
         indenter.indent(this.header);
         let headerString: string = new XMLDeclaration('1.0', 'UTF-8').toString();
@@ -148,8 +147,8 @@ export class TMReader {
         this.parseDatabase(callback);
     }
 
-    closeDb(count: number, callback: Function): void {
-        this.db.close((error: Error) => {
+    closeDb(count: number, callback: TMReaderCallback): void {
+        this.db.close((error: Error | null) => {
             if (error) {
                 callback({
                     'status': ERROR,
@@ -164,16 +163,34 @@ export class TMReader {
         });
     }
 
-    parseDatabase(callback: Function): void {
+    parseDatabase(callback: TMReaderCallback): void {
         let indenter: Indenter = new Indenter(2, 2);
         let sql: string = `SELECT id, source_segment, target_segment, creation_date, creation_user, change_date, change_user, last_used_date, last_used_user, usage_counter FROM translation_units`;
         this.db.each(sql, [],
-            (err: Error, row: any) => {
+            (err: Error | null, row: any) => {
                 if (err) {
-                    throw err;
+                    callback({
+                        'status': ERROR,
+                        'reason': err.message
+                    });
+                    return;
                 }
-                let source: XMLElement = this.toElement(row.source_segment);
-                let target: XMLElement = this.toElement(row.target_segment);
+                let source: XMLElement | undefined = this.toElement(row.source_segment);
+                if (!source) {
+                    callback({
+                        'status': ERROR,
+                        'reason': 'Cannot parse source segment'
+                    });
+                    return;
+                }
+                let target: XMLElement | undefined = this.toElement(row.target_segment);
+                if (!target) {
+                    callback({
+                        'status': ERROR,
+                        'reason': 'Cannot parse target segment'
+                    });
+                    return;
+                }
 
                 let tu: XMLElement = new XMLElement('tu');
                 tu.setAttribute(new XMLAttribute('creationid', row.creation_user));
@@ -201,26 +218,58 @@ export class TMReader {
                 if (usageCount && usageCount !== '0') {
                     tu.setAttribute(new XMLAttribute('usagecount', usageCount));
                 }
-                let srcLang: string = source.getChild('CultureName').getText();
+                let cultureName: XMLElement | undefined = source.getChild('CultureName');
+                if (!cultureName) {
+                    callback({
+                        'status': ERROR,
+                        'reason': 'Source segment without CultureName child'
+                    });
+                    return;
+                }
+                let srcLang: string = cultureName.getText();
                 let srcTuv: XMLElement = new XMLElement('tuv');
                 srcTuv.setAttribute(new XMLAttribute('xml:lang', srcLang));
                 tu.addElement(srcTuv);
                 let srcSeg: XMLElement = new XMLElement('seg');
-                srcSeg.setContent(this.parseContent(source.getChild('Elements')));
+                let elements: XMLElement | undefined = source.getChild('Elements');
+                if (!elements) {
+                    callback({
+                        'status': ERROR,
+                        'reason': 'Source segment without Elements child'
+                    });
+                    return;
+                }
+                srcSeg.setContent(this.parseContent(elements));
                 srcTuv.addElement(srcSeg);
 
-                let tgtLang: string = target.getChild('CultureName').getText();
+                cultureName = target.getChild('CultureName');
+                if (!cultureName) {
+                    callback({
+                        'status': ERROR,
+                        'reason': 'Target segment without CultureName child'
+                    });
+                    return;
+                }
+                let tgtLang: string = cultureName.getText();
                 let tgtTuv: XMLElement = new XMLElement('tuv');
                 tgtTuv.setAttribute(new XMLAttribute('xml:lang', tgtLang));
                 tu.addElement(tgtTuv);
                 let tgtSeg: XMLElement = new XMLElement('seg');
-                tgtSeg.setContent(this.parseContent(target.getChild('Elements')));
+                elements = target.getChild('Elements');
+                if (!elements) {
+                    callback({
+                        'status': ERROR,
+                        'reason': 'Target segment without Elements child'
+                    });
+                    return;
+                }
+                tgtSeg.setContent(this.parseContent(elements));
                 tgtTuv.addElement(tgtSeg);
 
                 indenter.indent(tu);
-                appendFileSync(this.tmx, Buffer.from('  ' + tu.toString() + '\n'), 'utf8');
+                appendFileSync(this.tmx, '  ' + tu.toString() + '\n', 'utf8');
             },
-            (error: Error, count: number) => {
+            (error: Error | null, count: number) => {
                 if (error) {
                     callback({
                         'status': ERROR,
@@ -233,10 +282,10 @@ export class TMReader {
             });
     }
 
-    toElement(text: string): XMLElement {
+    toElement(text: string): XMLElement | undefined {
         this.parser.parseString(XMLUtils.validXml10Chars(text));
-        let doc: XMLDocument = this.contentHandler.getDocument();
-        return doc.getRoot();
+        let doc: XMLDocument | undefined = this.contentHandler.getDocument();
+        return doc ? doc.getRoot() : undefined;
     }
 
     parseContent(element: XMLElement): Array<XMLNode> {
@@ -246,24 +295,56 @@ export class TMReader {
             if (node.getNodeType() === Constants.ELEMENT_NODE) {
                 let child: XMLElement = node as XMLElement;
                 if ('Text' === child.getName()) {
-                    result.addString(child.getChild('Value').getText());
+                    let value: XMLElement | undefined = child.getChild('Value');
+                    if (!value) {
+                        throw new Error('Text element without Value child');
+                    }
+                    result.addString(value.getText());
                 }
                 if ('Tag' === child.getName()) {
-                    let tagType: string = child.getChild('Type').getText();
+                    let type: XMLElement | undefined = child.getChild('Type');
+                    if (!type) {
+                        throw new Error('Tag element without Type child');
+                    }
+                    let tagType: string = type.getText();
                     if (tagType === 'Start') {
+                        let anchor: XMLElement | undefined = child.getChild('Anchor');
+                        if (!anchor) {
+                            throw new Error('Start Tag element without Anchor child');
+                        }
+                        let alignmentAnchor: XMLElement | undefined = child.getChild('AlignmentAnchor');
+                        if (!alignmentAnchor) {
+                            throw new Error('Start Tag element without AlignmentAnchor child');
+                        }
+                        let tagIdD: XMLElement | undefined = child.getChild('TagID');
+                        if (!tagIdD) {
+                            throw new Error('Start Tag element without TagID child');
+                        }
                         let bpt: XMLElement = new XMLElement('bpt');
-                        bpt.setAttribute(new XMLAttribute('i', child.getChild('Anchor').getText()));
-                        bpt.setAttribute(new XMLAttribute('x', child.getChild('AlignmentAnchor').getText()));
-                        bpt.setAttribute(new XMLAttribute('type', child.getChild('TagID').getText()));
+                        bpt.setAttribute(new XMLAttribute('i', anchor.getText()));
+                        bpt.setAttribute(new XMLAttribute('x', alignmentAnchor.getText()));
+                        bpt.setAttribute(new XMLAttribute('type', tagIdD.getText()));
                         result.addElement(bpt);
                     } else if (tagType === 'End') {
+                        let anchor: XMLElement | undefined = child.getChild('Anchor');
+                        if (!anchor) {
+                            throw new Error('End Tag element without Anchor child');
+                        }
                         let ept: XMLElement = new XMLElement('ept');
-                        ept.setAttribute(new XMLAttribute('i', child.getChild('Anchor').getText()));
+                        ept.setAttribute(new XMLAttribute('i', anchor.getText()));
                         result.addElement(ept);
                     } else {
+                        let alignmentAnchor: XMLElement | undefined = child.getChild('AlignmentAnchor');
+                        if (!alignmentAnchor) {
+                            throw new Error('Standalone Tag element without AlignmentAnchor child');
+                        }
+                        let tagIdD: XMLElement | undefined = child.getChild('TagID');
+                        if (!tagIdD) {
+                            throw new Error('Standalone Tag element without TagID child');
+                        }
                         let ph: XMLElement = new XMLElement('ph');
-                        ph.setAttribute(new XMLAttribute('x', child.getChild('AlignmentAnchor').getText()));
-                        ph.setAttribute(new XMLAttribute('type', child.getChild('TagID').getText()));
+                        ph.setAttribute(new XMLAttribute('x', alignmentAnchor.getText()));
+                        ph.setAttribute(new XMLAttribute('type', tagIdD.getText()));
                         result.addElement(ph);
                     }
                 }

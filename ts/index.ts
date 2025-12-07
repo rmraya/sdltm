@@ -11,3 +11,4 @@
  *******************************************************************************/
 
 export { TMReader } from './TMReader';
+export type { TMReaderCallback } from './TMReader';
