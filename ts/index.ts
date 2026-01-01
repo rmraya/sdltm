@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2022 - 2025 Maxprograms.
+ * Copyright (c) 2022-2026 Maxprograms.
  *
  * This program and the accompanying materials
  * are made available under the terms of the Eclipse   License 1.0
@@ -10,5 +10,5 @@
  *     Maxprograms - initial API and implementation
  *******************************************************************************/
 
-export { TMReader } from './TMReader';
-export type { TMReaderCallback } from './TMReader';
+export { TMReader } from './TMReader.js';
+export type { TMReaderCallback } from './TMReader.js';
