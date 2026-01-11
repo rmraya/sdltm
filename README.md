@@ -9,7 +9,7 @@ TypeScript library for converting SDLTM files (Translation Memory databases from
 ## Example
 
 ```TypeScript
-import { TMReader } from "./TMReader";
+import { TMReader } from "sdltm";
 
 const SUCCESS: string = 'Success';
 const ERROR: string = 'Error';

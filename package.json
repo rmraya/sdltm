@@ -1,6 +1,6 @@
 {
   "name": "sdltm",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "description": "TypeScript library for converting SDLTM files to TMX 1.4",
   "author": {
     "name": "Rodolfo M. Raya",
@@ -8,10 +8,17 @@
     "email": "rmraya@maxprograms.com"
   },
   "license": "EPL-1.0",
+  "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
   "files": [
-    "/dist"
+    "dist"
   ],
   "repository": {
     "type": "git",
@@ -27,6 +34,6 @@
     "@types/node": "^24.10.4",
     "@types/sqlite3": "^5.1.0",
     "sqlite3": "^5.1.7",
-    "typesxml": "^1.16.0"
+    "typesxml": "^1.17.0"
   }
 }
