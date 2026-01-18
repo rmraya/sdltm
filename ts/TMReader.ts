@@ -11,280 +11,272 @@
  *******************************************************************************/
 
 import { appendFileSync, existsSync, unlinkSync } from 'node:fs';
-import sqlite3, { Database } from 'sqlite3';
+import { DatabaseSync, StatementSync } from 'node:sqlite';
+import packageMetadataJson from '../package.json' with { type: 'json' };
 import { Constants, DOMBuilder, Indenter, SAXParser, XMLAttribute, XMLDeclaration, XMLDocument, XMLElement, XMLNode, XMLUtils } from 'typesxml';
 
 const SUCCESS: string = 'Success';
-const ERROR: string = 'Error';
 
-export type TMReaderCallback = (result: { status: typeof SUCCESS; count: number } | { status: typeof ERROR; reason: string }) => void;
+type PackageMetadata = {
+    name?: string;
+    version?: string;
+};
+
+type TranslationMemoryRow = {
+    source_language: string;
+    creation_user: string;
+    creation_date: string;
+};
+
+type AttributeRow = {
+    name: string;
+    type: number;
+    value: string;
+};
+
+type TranslationUnitRow = {
+    id: number;
+    source_segment: string;
+    target_segment: string;
+    creation_date: string;
+    creation_user: string;
+    change_date: string;
+    change_user: string;
+    last_used_date: string;
+    last_used_user: string;
+    usage_counter: string;
+};
+
+export type TMReaderResult = {
+    status: typeof SUCCESS;
+    count: number;
+};
+
+export type TMReaderOptions = {
+    productName?: string;
+    version?: string;
+};
 
 export class TMReader {
 
-    db: Database;
-    parser: SAXParser;
-    contentHandler: DOMBuilder;
-    productName: string = 'sdltm';
-    version: string = '1.7.0';
+    private db: DatabaseSync;
+    private parser: SAXParser;
+    private contentHandler: DOMBuilder;
+    private productName: string;
+    private version: string;
+    private tmx: string;
+    private header: XMLElement;
+    private indenter: Indenter;
 
-    tmx: string;
-    header: XMLElement;
+    constructor(options: TMReaderOptions = {}) {
+        const metadata: PackageMetadata = packageMetadataJson as PackageMetadata;
+        const packageName: string | undefined = options.productName ?? metadata.name;
+        if (!packageName) {
+            throw new Error('productName missing in options and package metadata');
+        }
+        const packageVersion: string | undefined = options.version ?? metadata.version;
+        if (!packageVersion) {
+            throw new Error('version missing in options and package metadata');
+        }
+        this.productName = packageName;
+        this.version = packageVersion;
+        this.tmx = '';
+        this.header = this.createHeader();
+        this.parser = new SAXParser();
+        this.contentHandler = new DOMBuilder();
+        this.parser.setContentHandler(this.contentHandler);
+        this.indenter = new Indenter(2, 2);
+        this.db = new DatabaseSync(':memory:', { readOnly: true });
+    }
 
-    constructor(sdltm: string, tmx: string, options: { productName?: string; version?: string }, callback: TMReaderCallback) {
+    async convert(sdltm: string, tmx: string): Promise<TMReaderResult> {
+        this.prepareOutput(sdltm, tmx);
+        let count: number = 0;
+        try {
+            this.reopenDatabase(sdltm);
+            this.populateHeader();
+            this.writeHeader();
+            count = this.writeTranslationUnits();
+        } catch (error: unknown) {
+            const failureMessage: string = error instanceof Error ? error.message : 'Unknown conversion error';
+            throw new Error(failureMessage);
+        } finally {
+            this.resetDatabase();
+        }
+        return { status: SUCCESS, count: count };
+    }
+
+    private prepareOutput(sdltm: string, tmx: string): void {
         if (existsSync(tmx)) {
             unlinkSync(tmx);
         }
         this.tmx = tmx;
-        if (options.productName) {
-            this.productName = options.productName;
+        this.header = this.createHeader();
+    }
+
+    private createHeader(): XMLElement {
+        const header: XMLElement = new XMLElement('header');
+        header.setAttribute(new XMLAttribute('creationtool', this.productName));
+        header.setAttribute(new XMLAttribute('creationtoolversion', this.version));
+        header.setAttribute(new XMLAttribute('o-tmf', 'SDLTM'));
+        header.setAttribute(new XMLAttribute('adminlang', 'en-US'));
+        header.setAttribute(new XMLAttribute('segtype', 'sentence'));
+        header.setAttribute(new XMLAttribute('datatype', 'unknown'));
+        return header;
+    }
+
+    private reopenDatabase(sdltm: string): void {
+        try {
+            this.db.close();
+        } catch { /* db might already be closed */ }
+        this.db = new DatabaseSync(sdltm, { readOnly: true });
+    }
+
+    private resetDatabase(): void {
+        try {
+            this.db.close();
+        } catch { /* ignore close errors during reset */ }
+        this.db = new DatabaseSync(':memory:', { readOnly: true });
+    }
+
+    private populateHeader(): void {
+        this.applyHeaderAttributes();
+        this.applyHeaderProperties();
+    }
+
+    private applyHeaderAttributes(): void {
+        const statement: StatementSync = this.db.prepare('SELECT source_language, creation_user, creation_date FROM translation_memories');
+        const rows: Array<TranslationMemoryRow> = statement.all() as Array<TranslationMemoryRow>;
+        if (rows.length === 0) {
+            throw new Error('translation_memories table is empty');
         }
-        if (options.version) {
-            this.version = options.version;
-        }
-        this.header = new XMLElement('header');
-        this.header.setAttribute(new XMLAttribute('creationtool', this.productName));
-        this.header.setAttribute(new XMLAttribute('creationtoolversion', this.version));
-        this.header.setAttribute(new XMLAttribute('o-tmf', 'SDLTM'));
-        this.header.setAttribute(new XMLAttribute('adminlang', 'en-US'));
-        this.header.setAttribute(new XMLAttribute('segtype', 'sentence'));
-        this.header.setAttribute(new XMLAttribute('datatype', 'unknown'));
-        this.parser = new SAXParser();
-        this.contentHandler = new DOMBuilder();
-        this.parser.setContentHandler(this.contentHandler);
-        this.db = new sqlite3.Database(sdltm, sqlite3.OPEN_READONLY, (error: Error | null) => {
-            if (error) {
-                callback({
-                    'status': ERROR,
-                    'reason': error.message
-                });
-                return;
-            }
-            this.getHeaderAttributes(callback);
+        rows.forEach((row: TranslationMemoryRow) => {
+            this.header.setAttribute(new XMLAttribute('srclang', row.source_language));
+            this.header.setAttribute(new XMLAttribute('creationdate', this.tmxDateString(row.creation_date)));
+            this.header.setAttribute(new XMLAttribute('creationid', row.creation_user));
         });
     }
 
-    getHeaderAttributes(callback: TMReaderCallback): void {
-        this.db.each(`SELECT source_language, creation_user, creation_date FROM translation_memories`, [],
-            // callback
-            (error: Error | null, row: any) => {
-                if (error) {
-                    callback({
-                        'status': ERROR,
-                        'reason': error.message
-                    });
-                    return;
+    private applyHeaderProperties(): void {
+        const propertiesMap: Map<string, XMLElement> = new Map<string, XMLElement>();
+        const statement: StatementSync = this.db.prepare('SELECT attributes.name AS name, attributes.type AS type, picklist_values.value AS value FROM attributes INNER JOIN picklist_values ON picklist_values.attribute_id = attributes.id ORDER BY name');
+        const rows: Array<AttributeRow> = statement.all() as Array<AttributeRow>;
+        rows.forEach((row: AttributeRow) => {
+            if (row.type === 5) {
+                if (!propertiesMap.has(row.name)) {
+                    const prop: XMLElement = new XMLElement('prop');
+                    const propertyType: string = 'x-' + row.name + ':MultplePicklist';
+                    prop.setAttribute(new XMLAttribute('type', propertyType));
+                    this.header.addElement(prop);
+                    propertiesMap.set(row.name, prop);
                 }
-                this.header.setAttribute(new XMLAttribute('srclang', row.source_language));
-                this.header.setAttribute(new XMLAttribute('creationdate', this.tmxDateString(row.creation_date)));
-                this.header.setAttribute(new XMLAttribute('creationid', row.creation_user));
-            },
-            // complete
-            (error: Error | null) => {
-                if (error) {
-                    callback({
-                        'status': ERROR,
-                        'reason': error.message
-                    });
-                    return;
+                const prop: XMLElement | undefined = propertiesMap.get(row.name);
+                if (prop) {
+                    if (prop.getText() !== '') {
+                        prop.addString(',');
+                    }
+                    prop.addString(row.value);
                 }
-                this.getHeaderProperties(callback);
             }
-        );
+        });
     }
 
-    getHeaderProperties(callback: TMReaderCallback): void {
-        let propertiesMap: Map<string, XMLElement> = new Map<string, XMLElement>();
-        this.db.each('SELECT attributes.name, attributes.type, picklist_values.value FROM attributes  ' +
-            'INNER JOIN  picklist_values  ON  picklist_values.attribute_id = attributes.id  ORDER BY  name;', [],
-            // callback
-            (error: Error | null, row: any) => {
-                if (error) {
-                    callback({
-                        'status': ERROR,
-                        'reason': error.message
-                    });
-                    return;
-                }
-                if (row.type === 5) {
-                    if (!propertiesMap.has(row.name)) {
-                        let prop: XMLElement = new XMLElement('prop');
-                        let propertyType: string = 'x-' + row.name + ':MultplePicklist';
-                        prop.setAttribute(new XMLAttribute('type', propertyType));
-                        this.header.addElement(prop);
-                        propertiesMap.set(row.name, prop);
-                    }
-                    let prop: XMLElement | undefined = propertiesMap.get(row.name);
-                    if (prop) {
-                        if (prop.getText() !== '') {
-                            prop.addString(',');
-                        }
-                        prop.addString(row.value);
-                    }
-                }
-            },
-            // complete all properties
-            (error: Error | null) => {
-                if (error) {
-                    callback({
-                        'status': ERROR,
-                        'reason': error.message
-                    });
-                    return;
-                }
-                this.writeHeader(callback);
-            }
-        );
-    }
-
-    writeHeader(callback: TMReaderCallback): void {
-        let indenter: Indenter = new Indenter(2, 2);
-        indenter.indent(this.header);
+    private writeHeader(): void {
+        this.indenter.indent(this.header);
         let headerString: string = new XMLDeclaration('1.0', 'UTF-8').toString();
-        headerString += '\n<tmx version="1.4">\n  '
+        headerString += '\n<tmx version="1.4">\n  ';
         headerString += this.header.toString();
         headerString += '\n  <body>\n';
         appendFileSync(this.tmx, headerString, 'utf8');
-        this.parseDatabase(callback);
     }
 
-    closeDb(count: number, callback: TMReaderCallback): void {
-        this.db.close((error: Error | null) => {
-            if (error) {
-                callback({
-                    'status': ERROR,
-                    'reason': error.message
-                });
-                return;
+    private writeTranslationUnits(): number {
+        const sql: string = 'SELECT id, source_segment, target_segment, creation_date, creation_user, change_date, change_user, last_used_date, last_used_user, usage_counter FROM translation_units';
+        const statement: StatementSync = this.db.prepare(sql);
+        const iterator: IterableIterator<unknown> = statement.iterate();
+        let count: number = 0;
+        let entry: IteratorResult<unknown> = iterator.next();
+        while (!entry.done) {
+            const row: TranslationUnitRow = entry.value as TranslationUnitRow;
+            const source: XMLElement | undefined = this.toElement(row.source_segment);
+            if (!source) {
+                throw new Error('Cannot parse source segment');
             }
-            callback({
-                'status': SUCCESS,
-                'count': count
-            });
-        });
-    }
+            const target: XMLElement | undefined = this.toElement(row.target_segment);
+            if (!target) {
+                throw new Error('Cannot parse target segment');
+            }
 
-    parseDatabase(callback: TMReaderCallback): void {
-        let indenter: Indenter = new Indenter(2, 2);
-        let sql: string = `SELECT id, source_segment, target_segment, creation_date, creation_user, change_date, change_user, last_used_date, last_used_user, usage_counter FROM translation_units`;
-        this.db.each(sql, [],
-            (err: Error | null, row: any) => {
-                if (err) {
-                    callback({
-                        'status': ERROR,
-                        'reason': err.message
-                    });
-                    return;
-                }
-                let source: XMLElement | undefined = this.toElement(row.source_segment);
-                if (!source) {
-                    callback({
-                        'status': ERROR,
-                        'reason': 'Cannot parse source segment'
-                    });
-                    return;
-                }
-                let target: XMLElement | undefined = this.toElement(row.target_segment);
-                if (!target) {
-                    callback({
-                        'status': ERROR,
-                        'reason': 'Cannot parse target segment'
-                    });
-                    return;
-                }
+            const tu: XMLElement = new XMLElement('tu');
+            tu.setAttribute(new XMLAttribute('creationid', row.creation_user));
+            tu.setAttribute(new XMLAttribute('creationdate', this.tmxDateString(row.creation_date)));
+            const changeDate: string = this.tmxDateString(row.change_date);
+            if (changeDate !== '') {
+                tu.setAttribute(new XMLAttribute('changedate', changeDate));
+            }
+            const changeUser: string = row.change_user;
+            if (changeUser !== '') {
+                tu.setAttribute(new XMLAttribute('changeid', changeUser));
+            }
+            const lastUsedDate: string = row.last_used_date;
+            if (lastUsedDate !== '') {
+                tu.setAttribute(new XMLAttribute('lastusagedate', this.tmxDateString(lastUsedDate)));
+            }
+            const lastUsedUser: string = row.last_used_user;
+            if (lastUsedUser !== '') {
+                const prop: XMLElement = new XMLElement('prop');
+                prop.setAttribute(new XMLAttribute('type', 'x-LastUsedBy'));
+                prop.addString(lastUsedUser);
+                tu.addElement(prop);
+            }
+            const usageCount: string = row.usage_counter;
+            if (usageCount && usageCount !== '0') {
+                tu.setAttribute(new XMLAttribute('usagecount', usageCount));
+            }
+            let cultureName: XMLElement | undefined = source.getChild('CultureName');
+            if (!cultureName) {
+                throw new Error('Source segment without CultureName child');
+            }
+            const srcLang: string = cultureName.getText();
+            const srcTuv: XMLElement = new XMLElement('tuv');
+            srcTuv.setAttribute(new XMLAttribute('xml:lang', srcLang));
+            tu.addElement(srcTuv);
+            const srcSeg: XMLElement = new XMLElement('seg');
+            const srcElements: XMLElement | undefined = source.getChild('Elements');
+            if (!srcElements) {
+                throw new Error('Source segment without Elements child');
+            }
+            srcSeg.setContent(this.parseContent(srcElements));
+            srcTuv.addElement(srcSeg);
 
-                let tu: XMLElement = new XMLElement('tu');
-                tu.setAttribute(new XMLAttribute('creationid', row.creation_user));
-                tu.setAttribute(new XMLAttribute('creationdate', this.tmxDateString(row.creation_date)));
-                let changeDate: string = this.tmxDateString(row.change_date);
-                if (changeDate !== '') {
-                    tu.setAttribute(new XMLAttribute('changedate', changeDate));
-                }
-                let changeUser: string = row.change_user;
-                if (changeUser !== '') {
-                    tu.setAttribute(new XMLAttribute('changeid', changeUser));
-                }
-                let lastUsedDate: string = row.last_used_date;
-                if (lastUsedDate !== '') {
-                    tu.setAttribute(new XMLAttribute('lastusagedate', this.tmxDateString(lastUsedDate)));
-                }
-                let lastUsedUser: string = row.last_used_user;
-                if (lastUsedUser !== '') {
-                    let prop: XMLElement = new XMLElement('prop');
-                    prop.setAttribute(new XMLAttribute('type', 'x-LastUsedBy'));
-                    prop.addString(lastUsedUser);
-                    tu.addElement(prop);
-                }
-                let usageCount: string = row.usage_counter;
-                if (usageCount && usageCount !== '0') {
-                    tu.setAttribute(new XMLAttribute('usagecount', usageCount));
-                }
-                let cultureName: XMLElement | undefined = source.getChild('CultureName');
-                if (!cultureName) {
-                    callback({
-                        'status': ERROR,
-                        'reason': 'Source segment without CultureName child'
-                    });
-                    return;
-                }
-                let srcLang: string = cultureName.getText();
-                let srcTuv: XMLElement = new XMLElement('tuv');
-                srcTuv.setAttribute(new XMLAttribute('xml:lang', srcLang));
-                tu.addElement(srcTuv);
-                let srcSeg: XMLElement = new XMLElement('seg');
-                let elements: XMLElement | undefined = source.getChild('Elements');
-                if (!elements) {
-                    callback({
-                        'status': ERROR,
-                        'reason': 'Source segment without Elements child'
-                    });
-                    return;
-                }
-                srcSeg.setContent(this.parseContent(elements));
-                srcTuv.addElement(srcSeg);
+            cultureName = target.getChild('CultureName');
+            if (!cultureName) {
+                throw new Error('Target segment without CultureName child');
+            }
+            const tgtLang: string = cultureName.getText();
+            const tgtTuv: XMLElement = new XMLElement('tuv');
+            tgtTuv.setAttribute(new XMLAttribute('xml:lang', tgtLang));
+            tu.addElement(tgtTuv);
+            const tgtSeg: XMLElement = new XMLElement('seg');
+            const tgtElements: XMLElement | undefined = target.getChild('Elements');
+            if (!tgtElements) {
+                throw new Error('Target segment without Elements child');
+            }
+            tgtSeg.setContent(this.parseContent(tgtElements));
+            tgtTuv.addElement(tgtSeg);
 
-                cultureName = target.getChild('CultureName');
-                if (!cultureName) {
-                    callback({
-                        'status': ERROR,
-                        'reason': 'Target segment without CultureName child'
-                    });
-                    return;
-                }
-                let tgtLang: string = cultureName.getText();
-                let tgtTuv: XMLElement = new XMLElement('tuv');
-                tgtTuv.setAttribute(new XMLAttribute('xml:lang', tgtLang));
-                tu.addElement(tgtTuv);
-                let tgtSeg: XMLElement = new XMLElement('seg');
-                elements = target.getChild('Elements');
-                if (!elements) {
-                    callback({
-                        'status': ERROR,
-                        'reason': 'Target segment without Elements child'
-                    });
-                    return;
-                }
-                tgtSeg.setContent(this.parseContent(elements));
-                tgtTuv.addElement(tgtSeg);
-
-                indenter.indent(tu);
-                appendFileSync(this.tmx, '  ' + tu.toString() + '\n', 'utf8');
-            },
-            (error: Error | null, count: number) => {
-                if (error) {
-                    callback({
-                        'status': ERROR,
-                        'reason': error.message
-                    });
-                    return;
-                }
-                appendFileSync(this.tmx, '  </body>\n</tmx>', 'utf8');
-                this.closeDb(count, callback);
-            });
+            this.indenter.indent(tu);
+            appendFileSync(this.tmx, '  ' + tu.toString() + '\n', 'utf8');
+            count += 1;
+            entry = iterator.next();
+        }
+        appendFileSync(this.tmx, '  </body>\n</tmx>', 'utf8');
+        return count;
     }
 
     toElement(text: string): XMLElement | undefined {
         this.parser.parseString(XMLUtils.validXml10Chars(text));
-        let doc: XMLDocument | undefined = this.contentHandler.getDocument();
+        const doc: XMLDocument | undefined = this.contentHandler.getDocument();
         return doc ? doc.getRoot() : undefined;
     }
 

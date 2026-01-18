@@ -11,4 +11,4 @@
  *******************************************************************************/
 
 export { TMReader } from './TMReader.js';
-export type { TMReaderCallback } from './TMReader.js';
+export type { TMReaderOptions, TMReaderResult } from './TMReader.js';
